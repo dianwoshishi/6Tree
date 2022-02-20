@@ -8,13 +8,21 @@ from ActiveScan import Scan
 import AliasDetection
 from copy import deepcopy
 import argparse
-import time
+import time, os, re
+from utility import *
 
+from logger import MyLog 
+from Title import Title
+from Result import Results
 """
 sudo python3 DynamicScan.py --input=/home/liguo/6Tree_no_APD_new/c1.hex  --output=/home/liguo/6Tree_no_APD_new/files --budget=500  --IPv6=2001:da8:ff:212::10:3
 """
 
-def DynamicScan(root, V, budget, source_ip, output_dir):
+from loguru import logger
+
+logger.add(sink='../output/error.log', format="{time} - {level} - {message}", level="INFO")
+
+def DynamicScan(root, V, budget, source_ip, output_dir,t,  args):
     """
     动态扫描空间树
 
@@ -37,8 +45,9 @@ def DynamicScan(root, V, budget, source_ip, output_dir):
     P = set()
     T = set()
     init_budget = deepcopy(budget)
-    active_file = output_dir + '/6Tree.result'+str(budget)
-    target_file = output_dir + '/6Tree.target'+str(budget)
+    suffix = t.getTitle()
+    active_file = output_dir + '/result_{}_{}'.format(time.strftime("%Y_%m_%d_%H_%M_%S",time.localtime()), suffix)
+    target_file = output_dir + '/result_{}_{}'.format(time.strftime("%Y_%m_%d_%H_%M_%S",time.localtime()), suffix)
     with open(active_file, 'w', encoding = 'utf-8') as f:
         f.seek(0)
         f.truncate()
@@ -47,14 +56,68 @@ def DynamicScan(root, V, budget, source_ip, output_dir):
         f.truncate()
     xi = [] # 待扫描结点队列ξ
     InitializeNodeQueue(root, xi)
-    xi, budget, R, T = Scan_Feedback(xi, init_budget, budget, R, T, V, source_ip, output_dir, target_file)
-    
+
+    result = Results()
+    result.set_title(t)
+    xi, budget, R, T, active_addrs, unique_addrs, iter_total = Scan_Feedback(xi, init_budget, budget, R, T, V, source_ip, output_dir, target_file, args)
+
+    MyLog.get_logger().info('[+]Hit rate:{}  \n\
+            iter_Hit rate:{} \n\
+            iter_find_rate:{} \n\
+            Remaining scan times:{}    \n\
+            gen_total:{}     \n\
+            活跃地址{}|{}\n'.format(
+                                    float(len(R)/(init_budget - budget)),
+                                    float((len(active_addrs) )/iter_total), 
+                                    float((len(unique_addrs))/iter_total), 
+                                    budget, (init_budget - budget), 
+                                    len(R), 
+                                    len(R)/init_budget))
+
+    hit_rate = float(len(R))/(init_budget - budget)
+    result.hitrates.append(hit_rate)
+
+    hit_rate1 = float(len(active_addrs))/iter_total
+    result.iter_hitrates.append(hit_rate1)
+
+    find_rate1 = float(len(unique_addrs))/iter_total
+    result.iter_findrates.append(find_rate1)
+
+    result.final_hit_rate = float(len(R))/(init_budget - budget)
+
     while budget > 0:
         xi_h = TakeOutFrontSegment(xi, int(0.1 * len(xi)))  # 每次迭代需要扫描的结点
         ReplaceDescendants(xi, xi_h)
-        xi_h, budget, R, T = Scan_Feedback(xi_h, init_budget, budget, R, T, V, source_ip, output_dir, target_file)
+        xi_h, budget, R, T , active_addrs, unique_addrs, iter_total= Scan_Feedback(xi_h, init_budget, budget, R, T, V, source_ip, output_dir, target_file)
         xi = MergeSort(xi_h, xi)    #!! 原本位于队伍后部的别名结点经过一次MergeSort又会到队伍首部去，
                                         #!! 导致对其进行重复的别名检测
+                                    
+        MyLog.get_logger().info('[+]Hit rate:{}  \n\
+                iter_Hit rate:{} \n\
+                iter_find_rate:{} \n\
+                Remaining scan times:{}    \n\
+                gen_total:{}     \n\
+                活跃地址{}|{}\n'.format(
+                                        float(len(R)/(init_budget - budget)),
+                                        float((len(active_addrs) )/iter_total), 
+                                        float((len(unique_addrs))/iter_total), 
+                                        budget, iter_total, 
+                                        len(R), 
+                                        len(R)/init_budget))
+        hit_rate = float(len(R))/(init_budget - budget)
+        result.hitrates.append(hit_rate)
+
+        hit_rate1 = float(len(active_addrs))/iter_total
+        result.iter_hitrates.append(hit_rate1)
+
+        find_rate1 = float(len(unique_addrs))/iter_total
+        result.iter_findrates.append(find_rate1)
+
+        result.final_hit_rate = float(len(R))/(init_budget - budget)
+    
+
+    result.plot()
+    
     
     with open(active_file, 'a', encoding='utf-8') as f:
         for addr in R:
@@ -85,7 +148,7 @@ def InitializeNodeQueue(root, xi):
             xi.append(node)
 
 
-def Scan_Feedback(xi, init_budget, budget, R, T, V, source_ip, output_dir, target_file):
+def Scan_Feedback(xi, init_budget, budget, R, T, V, source_ip, output_dir, target_file, args):
     """
     对队列xi中的所有结点进行一次扫描，
     并根据扫描得到的活跃地址密度对队列重新排序
@@ -125,14 +188,24 @@ def Scan_Feedback(xi, init_budget, budget, R, T, V, source_ip, output_dir, targe
         C = LimitBudget(budget, C)
         budget = 0
 
+    total = len(C)
     T.update(C)
     # with open(target_file, 'a', encoding='utf-8') as f:
     #     for target in C:
     #         f.write(target + '\n')
-    active_addrs = set(Scan(C, source_ip, output_dir, 0))   #扫描并得到活跃的地址集合
+    active_addrs = set(Scan(C, source_ip, output_dir, 0, args))   #扫描并得到活跃的地址集合
+
+    # 查看重复地址
+    intersec = R & (active_addrs)
+    # MyLog.get_logger().info(len(intersec), list(intersec)[:10])
+    MyLog.get_logger().info('[+]duplication {}'.format(len(intersec)))
+    # 新的地址
+    unique_addrs  = active_addrs - intersec
+
 
     R.update(active_addrs)
-    print('[+]Hit rate:{}   Remaining scan times:{}\n'
+
+    MyLog.get_logger().info('[+]Hit rate:{}   Remaining scan times:{}\n'
        .format(float(len(R)/(init_budget - budget)), budget))
 
     for i in range(len(xi)):
@@ -148,7 +221,7 @@ def Scan_Feedback(xi, init_budget, budget, R, T, V, source_ip, output_dir, targe
 
     xi = sorted(xi, key=lambda node: node.AAD, reverse=True)
     
-    return xi, budget, R, T
+    return xi, budget, R, T, active_addrs, unique_addrs, total
 
 
 def TakeOutFrontSegment(xi, m):
@@ -298,35 +371,63 @@ def LimitBudget(budget, C):
     del C[:-budget]
     return set(C)
 
+def getIPv6Address():
+    """
+    https://blog.csdn.net/COCO56/article/details/106725406
+    """
+    output = os.popen("ifconfig").read()
+    # MyLog.get_logger().info(output)
+    result = re.findall(r"(([a-f0-9]{1,4}:){7}[a-f0-9]{1,4})", output, re.I)
+    return result[0][0]
 
+@logger.catch
 def Start():
+
+    global t # global var, used to set the output suffix
+    t = Title()
+
     parse=argparse.ArgumentParser()
-    parse.add_argument('--input', type=str, help='input IPv6 addresses')
-    parse.add_argument('--output',type=str,help='output directory name')
-    parse.add_argument('--budget',type=int,help='the upperbound of scan times')
+    parse.add_argument('--input', type=str, help='input IPv6 addresses', default="./ouput/seed.txt")
+    parse.add_argument('--output',type=str,help='output directory name', default="./output/")
+    parse.add_argument('--budget',type=int,help='the upperbound of scan times', default=1000000)
+    parse.add_argument('--range', type=int, help='seed range', default=1000000)
+    parse.add_argument('--seedn', type=int, help='seed range', default=5000)
+    parse.add_argument('--probetool',type=str,help='the probe tool:zmap/xmap/xmap_echo', default='zmap')
+    parse.add_argument('--tree',type=str,help='the tree algo:dhc or trie', default='trie')
     parse.add_argument('--IPv6',type=str,help='local IPv6 address')
+    parse.add_argument('--eth',type=str,help='the eth', default='eth0')
+    parse.add_argument('--speed',type=str,help='the scan speed', default='1M')
+
     args=parse.parse_args()
+
+    t.setRangeBudgetSeedn(args.range, args.budget, args.seedn)
     # args.input = '/home/sgl/6Tree_no_APD/files/source_copy.hex'
     # args.output = '/home/sgl/6Tree_no_APD/files2'
     # args.budget = 50000
     # args.IPv6 = '2001:da8:ff:212::20:5'
+    args.IPv6 = getIPv6Address()
 
     V = InputAddrs(args.input, beta=16)
 
     root = SpaceTreeGen(V,beta=16)
-    print('Space tree generated with {} seeds!'.format(len(V)))    
+    MyLog.get_logger().info('Space tree generated with {} seeds!'.format(len(V)))    
 
+    t.setScannerName("Zmap_Echo")
+    t.setTreeName("Tree_6tree")
     
-    R, P, target_len, result_len, hit_rate = DynamicScan(root, V, args.budget, args.IPv6, args.output)
+    R, P, target_len, result_len, hit_rates = DynamicScan(root, V, args.budget, args.IPv6, args.output, t, args)
+
     with open(args.output + '/6Tree.alias', 'w', encoding = 'utf-8') as f:
         f.seek(0)
         f.truncate()
         for p in P:
             f.write(p + '\n')
-    print('Over!')
+    MyLog.get_logger().info('Over!')
+
+    
     # hit_rate = float(len(R))/(init_budget - budget)
     # return init_budget - budget, len(R), hit_rate
-    return target_len, result_len, hit_rate
+    return target_len, result_len, hit_rates
 
 
 if __name__ == '__main__':
