@@ -88,7 +88,7 @@ def DynamicScan(root, V, budget, source_ip, output_dir,t,  args):
     while budget > 0:
         xi_h = TakeOutFrontSegment(xi, int(0.1 * len(xi)))  # 每次迭代需要扫描的结点
         ReplaceDescendants(xi, xi_h)
-        xi_h, budget, R, T , active_addrs, unique_addrs, iter_total= Scan_Feedback(xi_h, init_budget, budget, R, T, V, source_ip, output_dir, target_file)
+        xi_h, budget, R, T , active_addrs, unique_addrs, iter_total= Scan_Feedback(xi_h, init_budget, budget, R, T, V, source_ip, output_dir, target_file, args)
         xi = MergeSort(xi_h, xi)    #!! 原本位于队伍后部的别名结点经过一次MergeSort又会到队伍首部去，
                                         #!! 导致对其进行重复的别名检测
                                     
